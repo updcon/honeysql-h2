@@ -3,4 +3,6 @@
   :url "https://github.com/updcon/honeysql-h2"
   :license {:name "Built In Project License"
             :url  "https://github.com/updcon/honeysql-h2/LICENSE"}
-  :dependencies [])
+  :dependencies [[com.github.seancorfield/honeysql "2.2.891"]
+                 [com.h2database/h2 "2.1.212"]
+                 [org.clojure/java.jdbc "0.7.12"]])

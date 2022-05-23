@@ -58,3 +58,7 @@
   Timestamp
   (result-set-read-column [v _2 _3]
     (.toLocalDateTime v)))
+
+;; helpers
+
+(def fbool (comp boolean first))

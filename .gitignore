@@ -4,3 +4,4 @@
 /.nrepl-port
 /*.properties
 .lein*
+pom.xml

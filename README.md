@@ -3,6 +3,8 @@
 ## Example
 
 ```clojure
+(require '[honeysql-h2.core :refer :all])
+
 (upsert [{:aa 11 :bb 22}] :table)
 ;; ["MERGE INTO table (aa, bb) VALUES (?, ?)" 11 22]
 (upsert [{:aa 11 :bb 22}] :table :aa)

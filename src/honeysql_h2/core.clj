@@ -62,3 +62,9 @@
 ;; helpers
 
 (def fbool (comp boolean first))
+
+(defn upsert [data table & [pk]]
+  (-> {:merge-into table
+       :vals       [pk data]}
+      sql/format))
+

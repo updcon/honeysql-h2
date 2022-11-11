@@ -65,7 +65,17 @@
 
 ;; helpers
 
-(def fbool (comp boolean first))
+(defn boolean! [v]
+  (if (not (boolean? v))
+    (boolean
+      (if (java.lang.Boolean/parseBoolean (str (or v "")))
+        true
+        (if (= v (.compareToIgnoreCase (str (or v "")) "false"))
+          false
+          (if (number? v) (pos? v) false))))
+    v))
+
+(def fbool (comp boolean! first))
 
 (defn upsert [data table & [pk]]
   (-> {:merge-into table

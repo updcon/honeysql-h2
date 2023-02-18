@@ -82,3 +82,6 @@
        :records    [pk data]}
       sql/format))
 
+(defn timestamp
+  ([] (timestamp (System/currentTimeMillis)))
+  ([millis] (Timestamp. millis)))

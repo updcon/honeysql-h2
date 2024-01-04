@@ -1,4 +1,4 @@
-(defproject ai.z7/honeysql-h2 "0.0.5"
+(defproject ai.z7/honeysql-h2 "0.0.6-TRUNK"
   :description "The H2 dialect extension for HoneySQL library"
   :url "https://github.com/updcon/honeysql-h2"
   :license {:name "Built In Project License"

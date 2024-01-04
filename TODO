@@ -1,0 +1,1 @@
+- implement basic "LISTAGG(field, delimiter) WITHIN GROUP (ORDER BY field) AS output-alias"

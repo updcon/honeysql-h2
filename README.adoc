@@ -16,6 +16,6 @@
 
 == License
 
-© 2022 UPD Consulting Ltd
+© 2022-2024 UPD Consulting, Fern Flower Lab and private contributors
 
 Distributed under the MIT license.

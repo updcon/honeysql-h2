@@ -11,6 +11,116 @@
 ;;            WITHIN GROUP (ORDER BY ...) [FILTER (WHERE ...)] [OVER (...)]
 ;; -----------------------------------------------------------------------------
 
+;; -----------------------------------------------------------------------------
+;; SEQUENCE support
+;; H2 syntax:
+;; CREATE SEQUENCE [IF NOT EXISTS] name [AS type] [START WITH n] [INCREMENT BY n]
+;;   [MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE] [CYCLE | NO CYCLE] [CACHE n | NO CACHE]
+;; ALTER SEQUENCE [IF EXISTS] name [RESTART [WITH n]] [INCREMENT BY n] ...
+;; DROP SEQUENCE [IF EXISTS] name
+;; NEXT VALUE FOR sequence_name
+;; CURRENT VALUE FOR sequence_name
+;; -----------------------------------------------------------------------------
+
+(defn- format-sequence-options
+  "Formats sequence options into SQL string.
+   Returns a string with all the option clauses."
+  [opts]
+  (let [parts (cond-> []
+                (:as opts)
+                (conj (str "AS " (sql/sql-kw (:as opts))))
+
+                (:start-with opts)
+                (conj (str "START WITH " (:start-with opts)))
+
+                (:restart opts)
+                (conj "RESTART")
+
+                (:restart-with opts)
+                (conj (str "RESTART WITH " (:restart-with opts)))
+
+                (:increment-by opts)
+                (conj (str "INCREMENT BY " (:increment-by opts)))
+
+                (:minvalue opts)
+                (conj (str "MINVALUE " (:minvalue opts)))
+
+                (:no-minvalue opts)
+                (conj "NO MINVALUE")
+
+                (:maxvalue opts)
+                (conj (str "MAXVALUE " (:maxvalue opts)))
+
+                (:no-maxvalue opts)
+                (conj "NO MAXVALUE")
+
+                (:cycle opts)
+                (conj "CYCLE")
+
+                (:no-cycle opts)
+                (conj "NO CYCLE")
+
+                (:cache opts)
+                (conj (str "CACHE " (:cache opts)))
+
+                (:no-cache opts)
+                (conj "NO CACHE"))]
+    (s/join " " parts)))
+
+(defn- create-sequence-formatter
+  "Formatter for CREATE SEQUENCE clause.
+   Accepts:
+   - keyword/symbol: sequence name
+   - [name opts-map]: sequence name with options"
+  [_ x]
+  (let [[seq-name opts] (if (sequential? x) x [x {}])
+        [name-sql] (sql/format-expr seq-name)
+        opts-str (format-sequence-options (dissoc opts :if-not-exists))]
+    [(str "CREATE SEQUENCE "
+          (when (:if-not-exists opts) "IF NOT EXISTS ")
+          name-sql
+          (when (seq opts-str) (str " " opts-str)))]))
+
+(defn- alter-sequence-formatter
+  "Formatter for ALTER SEQUENCE clause.
+   Accepts:
+   - keyword/symbol: sequence name
+   - [name opts-map]: sequence name with options"
+  [_ x]
+  (let [[seq-name opts] (if (sequential? x) x [x {}])
+        [name-sql] (sql/format-expr seq-name)
+        opts-str (format-sequence-options (dissoc opts :if-exists))]
+    [(str "ALTER SEQUENCE "
+          (when (:if-exists opts) "IF EXISTS ")
+          name-sql
+          (when (seq opts-str) (str " " opts-str)))]))
+
+(defn- drop-sequence-formatter
+  "Formatter for DROP SEQUENCE clause.
+   Accepts:
+   - keyword/symbol: sequence name
+   - [name opts-map]: sequence name with options (if-exists)"
+  [_ x]
+  (let [[seq-name opts] (if (sequential? x) x [x {}])
+        [name-sql] (sql/format-expr seq-name)]
+    [(str "DROP SEQUENCE "
+          (when (:if-exists opts) "IF EXISTS ")
+          name-sql)]))
+
+(defn- next-value-for-formatter
+  "Formatter for NEXT VALUE FOR function."
+  [_ args]
+  (let [[seq-name] args
+        [name-sql] (sql/format-expr seq-name)]
+    [(str "NEXT VALUE FOR " name-sql)]))
+
+(defn- current-value-for-formatter
+  "Formatter for CURRENT VALUE FOR function."
+  [_ args]
+  (let [[seq-name] args
+        [name-sql] (sql/format-expr seq-name)]
+    [(str "CURRENT VALUE FOR " name-sql)]))
+
 (defn- format-on-overflow
   "Formats the ON OVERFLOW clause for LISTAGG.
    Accepts:
@@ -60,6 +170,16 @@
     ;; Register LISTAGG functions
     (sql/register-fn! :listagg listagg-formatter)
     (sql/register-fn! :listagg-distinct listagg-formatter)
+
+    ;; Register SEQUENCE functions
+    (sql/register-fn! :next-value-for next-value-for-formatter)
+    (sql/register-fn! :current-value-for current-value-for-formatter)
+
+    ;; Register SEQUENCE clauses (order matters: later in list = earlier in SQL)
+    ;; These are standalone statements, not part of SELECT queries
+    (sql/register-clause! :create-sequence create-sequence-formatter nil)
+    (sql/register-clause! :alter-sequence alter-sequence-formatter nil)
+    (sql/register-clause! :drop-sequence drop-sequence-formatter nil)
 
     ;; Register MERGE INTO clauses
     (sql/register-clause! :records
@@ -239,3 +359,112 @@
 (defn timestamp
   ([] (timestamp (System/currentTimeMillis)))
   ([millis] (Timestamp. millis)))
+
+;; -----------------------------------------------------------------------------
+;; SEQUENCE helper functions
+;; -----------------------------------------------------------------------------
+
+(defn create-sequence
+  "Constructs a CREATE SEQUENCE statement map for H2.
+
+   Arguments:
+   - seq-name: The sequence name (keyword or symbol)
+   - opts: Optional map of sequence options
+
+   Options:
+   - :if-not-exists - Add IF NOT EXISTS clause
+   - :as - Data type (e.g., :bigint, :int)
+   - :start-with - Starting value
+   - :increment-by - Increment value
+   - :minvalue - Minimum value
+   - :no-minvalue - Use NO MINVALUE
+   - :maxvalue - Maximum value
+   - :no-maxvalue - Use NO MAXVALUE
+   - :cycle - Enable cycling
+   - :no-cycle - Disable cycling
+   - :cache - Cache size
+   - :no-cache - Disable caching
+
+   Examples:
+   (create-sequence :my_seq)
+   ;; => {:create-sequence :my_seq}
+
+   (create-sequence :my_seq {:start-with 100 :increment-by 10})
+   ;; => {:create-sequence [:my_seq {:start-with 100 :increment-by 10}]}"
+  ([seq-name]
+   {:create-sequence seq-name})
+  ([seq-name opts]
+   {:create-sequence [seq-name opts]}))
+
+(defn alter-sequence
+  "Constructs an ALTER SEQUENCE statement map for H2.
+
+   Arguments:
+   - seq-name: The sequence name (keyword or symbol)
+   - opts: Map of alter options
+
+   Options:
+   - :if-exists - Add IF EXISTS clause
+   - :restart - Restart the sequence
+   - :restart-with - Restart with specific value
+   - :increment-by - Change increment value
+   - :minvalue/:no-minvalue - Change minimum
+   - :maxvalue/:no-maxvalue - Change maximum
+   - :cycle/:no-cycle - Change cycling
+   - :cache/:no-cache - Change caching
+
+   Examples:
+   (alter-sequence :my_seq {:restart-with 500})
+   ;; => {:alter-sequence [:my_seq {:restart-with 500}]}"
+  [seq-name opts]
+  {:alter-sequence [seq-name opts]})
+
+(defn drop-sequence
+  "Constructs a DROP SEQUENCE statement map for H2.
+
+   Arguments:
+   - seq-name: The sequence name (keyword or symbol)
+   - opts: Optional map with :if-exists
+
+   Examples:
+   (drop-sequence :my_seq)
+   ;; => {:drop-sequence :my_seq}
+
+   (drop-sequence :my_seq {:if-exists true})
+   ;; => {:drop-sequence [:my_seq {:if-exists true}]}"
+  ([seq-name]
+   {:drop-sequence seq-name})
+  ([seq-name opts]
+   {:drop-sequence [seq-name opts]}))
+
+(defn nextval
+  "Constructs a NEXT VALUE FOR expression for use in queries.
+
+   Arguments:
+   - seq-name: The sequence name (keyword or symbol)
+
+   Examples:
+   (nextval :my_seq)
+   ;; => [:next-value-for :my_seq]
+
+   ;; In a query:
+   {:select [[(nextval :my_seq) :id]]}
+   ;; => SELECT NEXT VALUE FOR my_seq AS id"
+  [seq-name]
+  [:next-value-for seq-name])
+
+(defn currval
+  "Constructs a CURRENT VALUE FOR expression for use in queries.
+
+   Arguments:
+   - seq-name: The sequence name (keyword or symbol)
+
+   Examples:
+   (currval :my_seq)
+   ;; => [:current-value-for :my_seq]
+
+   ;; In a query:
+   {:select [[(currval :my_seq) :current_id]]}
+   ;; => SELECT CURRENT VALUE FOR my_seq AS current_id"
+  [seq-name]
+  [:current-value-for seq-name])

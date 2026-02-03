@@ -25,6 +25,7 @@ ai.z7/honeysql-h2 {:mvn/version "0.0.6"}
 
 * UPSERT support via H2's `MERGE INTO` statement
 * LISTAGG aggregate function with full H2 syntax support
+* SEQUENCE support (CREATE, ALTER, DROP, NEXT/CURRENT VALUE FOR)
 * Automatic JDBC date/time conversion to Java 8 types
 * Boolean coercion utilities
 
@@ -193,6 +194,201 @@ LISTAGG can also be used as a window function with the `:over` clause:
              :from [:employees]})
 ----
 
+=== Sequences
+
+Full support for H2's SEQUENCE operations including CREATE, ALTER, DROP, and value expressions.
+
+==== H2 Syntax Reference
+
+[source,sql]
+----
+-- Create
+CREATE SEQUENCE [IF NOT EXISTS] name [AS type] [START WITH n] [INCREMENT BY n]
+  [MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE] [CYCLE | NO CYCLE] [CACHE n | NO CACHE]
+
+-- Alter
+ALTER SEQUENCE [IF EXISTS] name [RESTART [WITH n]] [INCREMENT BY n] ...
+
+-- Drop
+DROP SEQUENCE [IF EXISTS] name
+
+-- Value expressions
+NEXT VALUE FOR sequence_name
+CURRENT VALUE FOR sequence_name
+----
+
+==== CREATE SEQUENCE
+
+[source,clojure]
+----
+;; Basic sequence
+(sql/format {:create-sequence :my_seq})
+;; => ["CREATE SEQUENCE my_seq"]
+
+;; With IF NOT EXISTS
+(sql/format {:create-sequence [:my_seq {:if-not-exists true}]})
+;; => ["CREATE SEQUENCE IF NOT EXISTS my_seq"]
+
+;; With all options
+(sql/format {:create-sequence [:my_seq {:if-not-exists true
+                                         :as :bigint
+                                         :start-with 100
+                                         :increment-by 10
+                                         :minvalue 1
+                                         :maxvalue 1000
+                                         :cycle true
+                                         :cache 32}]})
+;; => ["CREATE SEQUENCE IF NOT EXISTS my_seq AS BIGINT START WITH 100
+;;      INCREMENT BY 10 MINVALUE 1 MAXVALUE 1000 CYCLE CACHE 32"]
+----
+
+==== ALTER SEQUENCE
+
+[source,clojure]
+----
+;; Restart with value
+(sql/format {:alter-sequence [:my_seq {:restart-with 500}]})
+;; => ["ALTER SEQUENCE my_seq RESTART WITH 500"]
+
+;; With IF EXISTS
+(sql/format {:alter-sequence [:my_seq {:if-exists true :restart-with 1}]})
+;; => ["ALTER SEQUENCE IF EXISTS my_seq RESTART WITH 1"]
+
+;; Modify increment
+(sql/format {:alter-sequence [:my_seq {:increment-by 5}]})
+;; => ["ALTER SEQUENCE my_seq INCREMENT BY 5"]
+----
+
+==== DROP SEQUENCE
+
+[source,clojure]
+----
+;; Basic drop
+(sql/format {:drop-sequence :my_seq})
+;; => ["DROP SEQUENCE my_seq"]
+
+;; With IF EXISTS
+(sql/format {:drop-sequence [:my_seq {:if-exists true}]})
+;; => ["DROP SEQUENCE IF EXISTS my_seq"]
+----
+
+==== Value Expressions
+
+Use `NEXT VALUE FOR` and `CURRENT VALUE FOR` in queries:
+
+[source,clojure]
+----
+;; In SELECT
+(sql/format {:select [[[:next-value-for :my_seq] :id]]})
+;; => ["SELECT NEXT VALUE FOR my_seq AS id"]
+
+(sql/format {:select [[[:current-value-for :my_seq] :current_id]]})
+;; => ["SELECT CURRENT VALUE FOR my_seq AS current_id"]
+
+;; In INSERT
+(sql/format {:insert-into :users
+             :values [{:id [:next-value-for :my_seq] :name "Alice"}]})
+;; => ["INSERT INTO users (id, name) VALUES (NEXT VALUE FOR my_seq, ?)" "Alice"]
+
+;; Schema-qualified sequences
+(sql/format {:select [[[:next-value-for :myschema.my_seq] :id]]})
+;; => ["SELECT NEXT VALUE FOR myschema.my_seq AS id"]
+----
+
+==== Helper Functions
+
+Convenience functions for building sequence operations:
+
+[source,clojure]
+----
+(require '[honeysql-h2.core :as h2])
+
+;; CREATE SEQUENCE
+(h2/create-sequence :my_seq)
+;; => {:create-sequence :my_seq}
+
+(h2/create-sequence :my_seq {:start-with 100 :increment-by 10})
+;; => {:create-sequence [:my_seq {:start-with 100 :increment-by 10}]}
+
+;; ALTER SEQUENCE
+(h2/alter-sequence :my_seq {:restart-with 500})
+;; => {:alter-sequence [:my_seq {:restart-with 500}]}
+
+;; DROP SEQUENCE
+(h2/drop-sequence :my_seq)
+;; => {:drop-sequence :my_seq}
+
+(h2/drop-sequence :my_seq {:if-exists true})
+;; => {:drop-sequence [:my_seq {:if-exists true}]}
+
+;; Value expressions for use in queries
+(h2/nextval :my_seq)
+;; => [:next-value-for :my_seq]
+
+(h2/currval :my_seq)
+;; => [:current-value-for :my_seq]
+
+;; Full workflow example
+(sql/format (h2/create-sequence :user_id_seq {:start-with 1000}))
+;; => ["CREATE SEQUENCE user_id_seq START WITH 1000"]
+
+(sql/format {:insert-into :users
+             :values [{:id (h2/nextval :user_id_seq) :name "Bob"}]})
+;; => ["INSERT INTO users (id, name) VALUES (NEXT VALUE FOR user_id_seq, ?)" "Bob"]
+----
+
+==== Sequence Options Reference
+
+[cols="1,3"]
+|===
+| Option | Description
+
+| `:if-not-exists`
+| Add IF NOT EXISTS clause (CREATE only)
+
+| `:if-exists`
+| Add IF EXISTS clause (ALTER/DROP only)
+
+| `:as`
+| Data type (e.g., `:bigint`, `:int`)
+
+| `:start-with`
+| Starting value
+
+| `:restart`
+| Restart the sequence (ALTER only)
+
+| `:restart-with`
+| Restart with specific value (ALTER only)
+
+| `:increment-by`
+| Increment value
+
+| `:minvalue`
+| Minimum value
+
+| `:no-minvalue`
+| Use NO MINVALUE
+
+| `:maxvalue`
+| Maximum value
+
+| `:no-maxvalue`
+| Use NO MAXVALUE
+
+| `:cycle`
+| Enable cycling
+
+| `:no-cycle`
+| Disable cycling
+
+| `:cache`
+| Cache size
+
+| `:no-cache`
+| Disable caching
+|===
+
 === Boolean Coercion
 
 The `boolean!` function provides sophisticated boolean coercion from various types.
@@ -314,6 +510,23 @@ This happens automatically when you require the namespace.
 | `(listagg expr & opts)`
 | Build a LISTAGG expression. Options: `:separator`, `:distinct`, `:on-overflow`, `:within-group`, `:filter`, `:over`
 
+| `(create-sequence name)` +
+  `(create-sequence name opts)`
+| Build a CREATE SEQUENCE statement map.
+
+| `(alter-sequence name opts)`
+| Build an ALTER SEQUENCE statement map.
+
+| `(drop-sequence name)` +
+  `(drop-sequence name opts)`
+| Build a DROP SEQUENCE statement map.
+
+| `(nextval name)`
+| Build a NEXT VALUE FOR expression: `[:next-value-for name]`
+
+| `(currval name)`
+| Build a CURRENT VALUE FOR expression: `[:current-value-for name]`
+
 | `(boolean! v)`
 | Coerce any value to boolean with type-aware handling.
 
@@ -342,6 +555,21 @@ This happens automatically when you require the namespace.
 
 | `:records`
 | Records clause for MERGE INTO (internal)
+
+| `:create-sequence`
+| CREATE SEQUENCE clause: `{:create-sequence name}` or `{:create-sequence [name opts]}`
+
+| `:alter-sequence`
+| ALTER SEQUENCE clause: `{:alter-sequence [name opts]}`
+
+| `:drop-sequence`
+| DROP SEQUENCE clause: `{:drop-sequence name}` or `{:drop-sequence [name opts]}`
+
+| `:next-value-for`
+| NEXT VALUE FOR function: `[:next-value-for seq-name]`
+
+| `:current-value-for`
+| CURRENT VALUE FOR function: `[:current-value-for seq-name]`
 |===
 
 == License

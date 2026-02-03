@@ -5,8 +5,63 @@
   (:import (java.sql Date Time Timestamp)))
 
 ;; honeysql extensions
+;; -----------------------------------------------------------------------------
+;; LISTAGG function support
+;; H2 syntax: LISTAGG([DISTINCT|ALL] expr [, separator] [ON OVERFLOW ...])
+;;            WITHIN GROUP (ORDER BY ...) [FILTER (WHERE ...)] [OVER (...)]
+;; -----------------------------------------------------------------------------
+
+(defn- format-on-overflow
+  "Formats the ON OVERFLOW clause for LISTAGG.
+   Accepts:
+   - :error or :on-overflow-error -> ON OVERFLOW ERROR
+   - [:truncate] -> ON OVERFLOW TRUNCATE
+   - [:truncate filler] -> ON OVERFLOW TRUNCATE 'filler'
+   - [:truncate filler :with-count] -> ON OVERFLOW TRUNCATE 'filler' WITH COUNT
+   - [:truncate filler :without-count] -> ON OVERFLOW TRUNCATE 'filler' WITHOUT COUNT"
+  [overflow]
+  (cond
+    (or (= overflow :error) (= overflow :on-overflow-error))
+    " ON OVERFLOW ERROR"
+
+    (and (vector? overflow) (= :truncate (first overflow)))
+    (let [[_ filler count-opt] overflow
+          [filler-sql] (when filler (sql/format-expr [:inline filler]))]
+      (str " ON OVERFLOW TRUNCATE"
+           (when filler-sql (str " " filler-sql))
+           (case count-opt
+             :with-count " WITH COUNT"
+             :without-count " WITHOUT COUNT"
+             nil)))
+
+    :else nil))
+
+(defn- listagg-formatter
+  "Formatter for LISTAGG function.
+   Args can be:
+   - [expr] -> LISTAGG(expr)
+   - [expr separator] -> LISTAGG(expr, 'separator')
+   - [expr separator overflow] -> LISTAGG(expr, 'separator' ON OVERFLOW ...)"
+  [f args]
+  (let [distinct? (= f :listagg-distinct)
+        [expr separator overflow] args
+        [expr-sql & expr-params] (sql/format-expr expr)
+        [sep-sql] (when separator (sql/format-expr [:inline separator]))
+        base-sql (str "LISTAGG("
+                      (when distinct? "DISTINCT ")
+                      expr-sql
+                      (when sep-sql (str ", " sep-sql))
+                      (when overflow (format-on-overflow overflow))
+                      ")")]
+    (into [base-sql] expr-params)))
+
 (defn h2ext []
   (do
+    ;; Register LISTAGG functions
+    (sql/register-fn! :listagg listagg-formatter)
+    (sql/register-fn! :listagg-distinct listagg-formatter)
+
+    ;; Register MERGE INTO clauses
     (sql/register-clause! :records
                           (fn [_ [pk xs]]
                             (let [cols-1 (keys (first xs))
@@ -44,7 +99,6 @@
                                     (sql/format-dsl x))]
                               (into [(str (sql/sql-kw clause) " " sql)] params)))
                           :records)                         ; <!> MERGE INTO ... ... KEY(_pk) VALUES ...
-    ;(println ">> H2 clauses registered")
     true))
 
 (defonce ^:static ^:private h2-inited (h2ext))
@@ -121,6 +175,66 @@
   (-> {:merge-into table
        :records    [pk data]}
       sql/format))
+
+(defn listagg
+  "Constructs a LISTAGG aggregate expression for H2.
+
+   Arguments:
+   - expr: The expression to aggregate (required)
+
+   Options (keyword arguments):
+   - :separator    - String separator between values (default: none)
+   - :distinct     - If true, use DISTINCT (default: false)
+   - :on-overflow  - Overflow handling:
+                     - :error -> ON OVERFLOW ERROR
+                     - [:truncate] -> ON OVERFLOW TRUNCATE
+                     - [:truncate \"...\"] -> ON OVERFLOW TRUNCATE '...'
+                     - [:truncate \"...\" :with-count] -> ON OVERFLOW TRUNCATE '...' WITH COUNT
+                     - [:truncate \"...\" :without-count] -> ON OVERFLOW TRUNCATE '...' WITHOUT COUNT
+   - :within-group - Order specification map, e.g., {:order-by [:name]}
+   - :filter       - Filter condition, e.g., [:= :active true]
+   - :over         - Window specification, e.g., {:partition-by [:dept]}
+                     Uses HoneySQL syntax: [:over [[expr window-spec]]]
+
+   Examples:
+   (listagg :name)
+   ;; => [:listagg :name]
+
+   (listagg :name :separator \", \" :distinct true)
+   ;; => [:listagg-distinct :name \", \"]
+
+   (listagg :name :separator \", \" :within-group {:order-by [:name]})
+   ;; => [:within-group [:listagg :name \", \"] {:order-by [:name]}]
+
+   (listagg :name
+            :separator \", \"
+            :on-overflow [:truncate \"...\" :with-count]
+            :within-group {:order-by [:name]}
+            :filter [:= :active true])
+   ;; Full expression with all clauses"
+  [expr & {:keys [separator distinct on-overflow within-group filter over]}]
+  (let [;; Build the core LISTAGG expression
+        fn-name (if distinct :listagg-distinct :listagg)
+        core-expr (cond-> [fn-name expr]
+                    separator (conj separator)
+                    on-overflow (conj on-overflow))
+
+        ;; Wrap with WITHIN GROUP if specified
+        with-within-group (if within-group
+                            [:within-group core-expr within-group]
+                            core-expr)
+
+        ;; Wrap with FILTER if specified
+        with-filter (if filter
+                      [:filter with-within-group {:where filter}]
+                      with-within-group)
+
+        ;; Wrap with OVER if specified (HoneySQL expects [:over [[expr spec]]])
+        with-over (if over
+                    [:over [[with-filter over]]]
+                    with-filter)]
+
+    with-over))
 
 (defn timestamp
   ([] (timestamp (System/currentTimeMillis)))

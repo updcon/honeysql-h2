@@ -1,5 +1,6 @@
 (ns honeysql-h2.core-test
   (:require [clojure.test :refer [deftest testing is are]]
+            [honey.sql :as sql]
             [honeysql-h2.core :as h2]))
 
 ;; =============================================================================
@@ -179,3 +180,140 @@
           ^java.sql.Timestamp ts (h2/timestamp millis)]
       (is (instance? java.sql.Timestamp ts))
       (is (= millis (.getTime ts))))))
+
+;; =============================================================================
+;; LISTAGG tests
+;; =============================================================================
+
+(deftest listagg-basic-test
+  (testing "basic LISTAGG with expression only"
+    (let [[sql] (sql/format {:select [[[:listagg :name] :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(name)"))))
+
+  (testing "LISTAGG with separator"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", "] :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(name, ', ')")))))
+
+(deftest listagg-distinct-test
+  (testing "LISTAGG DISTINCT"
+    (let [[sql] (sql/format {:select [[[:listagg-distinct :name ", "] :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(DISTINCT name, ', ')")))))
+
+(deftest listagg-on-overflow-error-test
+  (testing "LISTAGG with ON OVERFLOW ERROR"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", " :error] :names]]})]
+      (is (clojure.string/includes? sql "ON OVERFLOW ERROR")))))
+
+(deftest listagg-on-overflow-truncate-test
+  (testing "LISTAGG with ON OVERFLOW TRUNCATE (no filler)"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", " [:truncate]] :names]]})]
+      (is (clojure.string/includes? sql "ON OVERFLOW TRUNCATE"))))
+
+  (testing "LISTAGG with ON OVERFLOW TRUNCATE with filler"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", " [:truncate "..."]] :names]]})]
+      (is (clojure.string/includes? sql "ON OVERFLOW TRUNCATE"))
+      (is (clojure.string/includes? sql "..."))))
+
+  (testing "LISTAGG with ON OVERFLOW TRUNCATE WITH COUNT"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", " [:truncate "..." :with-count]] :names]]})]
+      (is (clojure.string/includes? sql "ON OVERFLOW TRUNCATE"))
+      (is (clojure.string/includes? sql "WITH COUNT"))))
+
+  (testing "LISTAGG with ON OVERFLOW TRUNCATE WITHOUT COUNT"
+    (let [[sql] (sql/format {:select [[[:listagg :name ", " [:truncate "..." :without-count]] :names]]})]
+      (is (clojure.string/includes? sql "ON OVERFLOW TRUNCATE"))
+      (is (clojure.string/includes? sql "WITHOUT COUNT")))))
+
+(deftest listagg-within-group-test
+  (testing "LISTAGG with WITHIN GROUP"
+    (let [[sql] (sql/format {:select [[[:within-group
+                                        [:listagg :name ", "]
+                                        {:order-by [:name]}]
+                                       :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(name, ', ')"))
+      (is (clojure.string/includes? sql "WITHIN GROUP"))
+      (is (clojure.string/includes? sql "ORDER BY")))))
+
+(deftest listagg-filter-test
+  (testing "LISTAGG with FILTER"
+    (let [[sql & params] (sql/format {:select [[[:filter
+                                                 [:listagg :name ", "]
+                                                 {:where [:= :active true]}]
+                                                :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(name, ', ')"))
+      (is (clojure.string/includes? sql "FILTER"))
+      (is (clojure.string/includes? sql "WHERE")))))
+
+(deftest listagg-over-test
+  (testing "LISTAGG with OVER (window function)"
+    ;; HoneySQL expects :over to contain a vector of [expr window-spec] pairs
+    (let [[sql] (sql/format {:select [[[:over
+                                        [[[:within-group
+                                           [:listagg :name ", "]
+                                           {:order-by [:name]}]
+                                          {:partition-by [:department]}]]]
+                                       :names]]})]
+      (is (clojure.string/includes? sql "LISTAGG(name, ', ')"))
+      (is (clojure.string/includes? sql "WITHIN GROUP"))
+      (is (clojure.string/includes? sql "OVER"))
+      (is (clojure.string/includes? sql "PARTITION BY")))))
+
+;; =============================================================================
+;; listagg helper function tests
+;; =============================================================================
+
+(deftest listagg-helper-basic-test
+  (testing "listagg helper - basic"
+    (is (= [:listagg :name] (h2/listagg :name))))
+
+  (testing "listagg helper - with separator"
+    (is (= [:listagg :name ", "] (h2/listagg :name :separator ", "))))
+
+  (testing "listagg helper - with distinct"
+    (is (= [:listagg-distinct :name ", "]
+           (h2/listagg :name :separator ", " :distinct true)))))
+
+(deftest listagg-helper-on-overflow-test
+  (testing "listagg helper - on-overflow error"
+    (is (= [:listagg :name ", " :error]
+           (h2/listagg :name :separator ", " :on-overflow :error))))
+
+  (testing "listagg helper - on-overflow truncate"
+    (is (= [:listagg :name ", " [:truncate "..." :with-count]]
+           (h2/listagg :name :separator ", " :on-overflow [:truncate "..." :with-count])))))
+
+(deftest listagg-helper-within-group-test
+  (testing "listagg helper - with within-group"
+    (is (= [:within-group [:listagg :name ", "] {:order-by [:name]}]
+           (h2/listagg :name :separator ", " :within-group {:order-by [:name]})))))
+
+(deftest listagg-helper-filter-test
+  (testing "listagg helper - with filter"
+    (is (= [:filter [:listagg :name ", "] {:where [:= :active true]}]
+           (h2/listagg :name :separator ", " :filter [:= :active true])))))
+
+(deftest listagg-helper-combined-test
+  (testing "listagg helper - all options combined"
+    (let [result (h2/listagg :name
+                             :separator ", "
+                             :distinct true
+                             :on-overflow [:truncate "..." :with-count]
+                             :within-group {:order-by [:name]}
+                             :filter [:= :active true]
+                             :over {:partition-by [:dept]})]
+      ;; Should be: [:over [:filter [:within-group [:listagg-distinct :name ", " [...]] {...}] {...}] {...}]
+      (is (= :over (first result)))
+      (is (vector? result))))
+
+  (testing "listagg helper - full SQL generation"
+    (let [expr (h2/listagg :name
+                           :separator ", "
+                           :distinct true
+                           :within-group {:order-by [:name]}
+                           :filter [:= :active true])
+          [sql & _] (sql/format {:select [[expr :names]] :from [:users]})]
+      (is (clojure.string/includes? sql "LISTAGG(DISTINCT name, ', ')"))
+      (is (clojure.string/includes? sql "WITHIN GROUP"))
+      (is (clojure.string/includes? sql "ORDER BY"))
+      (is (clojure.string/includes? sql "FILTER"))
+      (is (clojure.string/includes? sql "WHERE")))))

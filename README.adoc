@@ -1,21 +1,352 @@
 = honeysql-h2
+:toc:
+:toc-placement: preamble
+:toclevels: 2
 
-== Example
+H2 database dialect extension for the https://github.com/seancorfield/honeysql[HoneySQL] library.
+
+== Installation
+
+Add to your `project.clj`:
 
 [source,clojure]
 ----
-(require '[honeysql-h2.core :refer :all])
-
-(upsert [{:aa 11 :bb 22}] :table)
-;; ["MERGE INTO table (aa, bb) VALUES (?, ?)" 11 22]
-(upsert [{:aa 11 :bb 22}] :table :aa)
-;; ["MERGE INTO table (aa, bb) KEY(aa) VALUES (?, ?)" 11 22]
-(upsert [{:aa 11 :bb 22}] :table [:p :s])
-;; ["MERGE INTO table (aa, bb) KEY(p,s) VALUES (?, ?)" 11 22]
+[ai.z7/honeysql-h2 "0.0.6"]
 ----
+
+Or `deps.edn`:
+
+[source,clojure]
+----
+ai.z7/honeysql-h2 {:mvn/version "0.0.6"}
+----
+
+== Features
+
+* UPSERT support via H2's `MERGE INTO` statement
+* LISTAGG aggregate function with full H2 syntax support
+* Automatic JDBC date/time conversion to Java 8 types
+* Boolean coercion utilities
+
+== Usage
+
+[source,clojure]
+----
+(require '[honeysql-h2.core :as h2])
+(require '[honey.sql :as sql])
+----
+
+=== UPSERT (MERGE INTO)
+
+The `upsert` function generates H2's `MERGE INTO` statement for insert-or-update operations.
+
+[source,clojure]
+----
+;; Basic upsert without key
+(h2/upsert [{:name "Alice" :age 30}] :users)
+;; => ["MERGE INTO users (name, age) VALUES (?, ?)" "Alice" 30]
+
+;; With single primary key
+(h2/upsert [{:id 1 :name "Alice" :age 30}] :users :id)
+;; => ["MERGE INTO users (id, name, age) KEY(id) VALUES (?, ?, ?)" 1 "Alice" 30]
+
+;; With composite primary key
+(h2/upsert [{:tenant "acme" :id 1 :name "Alice"}] :users [:tenant :id])
+;; => ["MERGE INTO users (tenant, id, name) KEY(tenant,id) VALUES (?, ?, ?)" "acme" 1 "Alice"]
+
+;; Multiple records
+(h2/upsert [{:id 1 :name "Alice"} {:id 2 :name "Bob"}] :users :id)
+;; => ["MERGE INTO users (id, name) KEY(id) VALUES (?, ?), (?, ?)" 1 "Alice" 2 "Bob"]
+----
+
+=== LISTAGG Aggregate Function
+
+Full support for H2's LISTAGG function with all optional clauses.
+
+==== H2 Syntax Reference
+
+[source,sql]
+----
+LISTAGG ( [ DISTINCT | ALL ] expression [, separator]
+  [ ON OVERFLOW { ERROR | TRUNCATE [filler] { WITH | WITHOUT } COUNT } ] )
+  WITHIN GROUP (ORDER BY ...)
+  [ FILTER (WHERE ...) ]
+  [ OVER (...) ]
+----
+
+==== Low-Level Usage
+
+Use HoneySQL expressions directly:
+
+[source,clojure]
+----
+;; Basic LISTAGG
+(sql/format {:select [[[:listagg :name ", "] :names]]
+             :from [:users]})
+;; => ["SELECT LISTAGG(name, ', ') AS names FROM users"]
+
+;; With DISTINCT
+(sql/format {:select [[[:listagg-distinct :name ", "] :names]]
+             :from [:users]})
+;; => ["SELECT LISTAGG(DISTINCT name, ', ') AS names FROM users"]
+
+;; With WITHIN GROUP (ordering)
+(sql/format {:select [[[:within-group
+                        [:listagg :name ", "]
+                        {:order-by [:name]}]
+                       :names]]
+             :from [:users]})
+;; => ["SELECT LISTAGG(name, ', ') WITHIN GROUP (ORDER BY name ASC) AS names FROM users"]
+
+;; With FILTER clause
+(sql/format {:select [[[:filter
+                        [:within-group [:listagg :name ", "] {:order-by [:name]}]
+                        {:where [:= :active true]}]
+                       :names]]
+             :from [:users]})
+;; => ["SELECT LISTAGG(name, ', ') WITHIN GROUP (ORDER BY name ASC)
+;;      FILTER (WHERE active = TRUE) AS names FROM users"]
+----
+
+==== ON OVERFLOW Clause
+
+Handle overflow when the result exceeds the maximum length:
+
+[source,clojure]
+----
+;; ON OVERFLOW ERROR (default H2 behavior)
+[:listagg :name ", " :error]
+
+;; ON OVERFLOW TRUNCATE
+[:listagg :name ", " [:truncate]]
+
+;; ON OVERFLOW TRUNCATE with custom filler
+[:listagg :name ", " [:truncate "..."]]
+
+;; ON OVERFLOW TRUNCATE with filler and count indicator
+[:listagg :name ", " [:truncate "..." :with-count]]
+;; => LISTAGG(name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT)
+
+[:listagg :name ", " [:truncate "..." :without-count]]
+;; => LISTAGG(name, ', ' ON OVERFLOW TRUNCATE '...' WITHOUT COUNT)
+----
+
+==== Helper Function
+
+The `listagg` helper provides a convenient keyword-argument interface:
+
+[source,clojure]
+----
+(require '[honeysql-h2.core :refer [listagg]])
+
+;; Simple usage
+(listagg :name)
+;; => [:listagg :name]
+
+;; With separator
+(listagg :name :separator ", ")
+;; => [:listagg :name ", "]
+
+;; With DISTINCT
+(listagg :name :separator ", " :distinct true)
+;; => [:listagg-distinct :name ", "]
+
+;; With ordering
+(listagg :name :separator ", " :within-group {:order-by [:name]})
+;; => [:within-group [:listagg :name ", "] {:order-by [:name]}]
+
+;; Full example with all options
+(listagg :name
+         :separator ", "
+         :distinct true
+         :on-overflow [:truncate "..." :with-count]
+         :within-group {:order-by [:name]}
+         :filter [:= :active true])
+
+;; Use in a query
+(sql/format {:select [[(listagg :name
+                                :separator ", "
+                                :within-group {:order-by [:name]}
+                                :filter [:> :age 18])
+                       :adult_names]]
+             :from [:users]
+             :group-by [:department]})
+----
+
+==== Window Function Support
+
+LISTAGG can also be used as a window function with the `:over` clause:
+
+[source,clojure]
+----
+;; Using the helper
+(listagg :name
+         :separator ", "
+         :within-group {:order-by [:name]}
+         :over {:partition-by [:department]})
+
+;; Direct HoneySQL syntax (note the nested vector structure)
+(sql/format {:select [[[:over
+                        [[[:within-group [:listagg :name ", "] {:order-by [:name]}]
+                          {:partition-by [:department]}]]]
+                       :dept_names]]
+             :from [:employees]})
+----
+
+=== Boolean Coercion
+
+The `boolean!` function provides sophisticated boolean coercion from various types.
+
+[source,clojure]
+----
+(require '[honeysql-h2.core :refer [boolean! fbool]])
+
+;; Booleans pass through
+(boolean! true)   ;; => true
+(boolean! false)  ;; => false
+
+;; nil is false
+(boolean! nil)    ;; => false
+
+;; Strings (case-insensitive)
+(boolean! "true")  ;; => true
+(boolean! "TRUE")  ;; => true
+(boolean! "yes")   ;; => true
+(boolean! "on")    ;; => true
+(boolean! "1")     ;; => true
+(boolean! "t")     ;; => true
+(boolean! "y")     ;; => true
+
+(boolean! "false") ;; => false
+(boolean! "no")    ;; => false
+(boolean! "off")   ;; => false
+(boolean! "0")     ;; => false
+(boolean! "f")     ;; => false
+(boolean! "n")     ;; => false
+(boolean! "")      ;; => false
+
+;; Whitespace is trimmed
+(boolean! "  true  ") ;; => true
+
+;; Unknown strings are false (strict mode)
+(boolean! "maybe") ;; => false
+
+;; Numbers: positive = true, zero/negative = false
+(boolean! 1)    ;; => true
+(boolean! 42)   ;; => true
+(boolean! 0.5)  ;; => true
+(boolean! 0)    ;; => false
+(boolean! -1)   ;; => false
+
+;; Collections: non-empty = true, empty = false
+(boolean! [1 2 3]) ;; => true
+(boolean! [])      ;; => false
+(boolean! {:a 1})  ;; => true
+(boolean! {})      ;; => false
+----
+
+The `fbool` function extracts the first element and converts to boolean (useful for query results):
+
+[source,clojure]
+----
+;; Useful for single-value query results
+(fbool [{:exists true}])  ;; => true
+(fbool [true])            ;; => true
+(fbool [1])               ;; => true
+(fbool [nil])             ;; => false
+(fbool [])                ;; => false
+----
+
+=== Timestamp Helper
+
+Create `java.sql.Timestamp` instances:
+
+[source,clojure]
+----
+(require '[honeysql-h2.core :refer [timestamp]])
+
+;; Current timestamp
+(timestamp)
+;; => #inst "2026-..."
+
+;; From milliseconds
+(timestamp 1234567890000)
+;; => #inst "2009-02-13T23:31:30.000-00:00"
+----
+
+=== Automatic Date/Time Conversion
+
+The library extends `clojure.java.jdbc` to automatically convert JDBC date/time types to Java 8 types when reading result sets:
+
+|===
+| JDBC Type | Converted To
+
+| `java.sql.Date`
+| `java.time.LocalDate`
+
+| `java.sql.Time`
+| `java.time.LocalTime`
+
+| `java.sql.Timestamp`
+| `java.time.LocalDateTime`
+|===
+
+This happens automatically when you require the namespace.
+
+== Dependencies
+
+* https://github.com/seancorfield/honeysql[HoneySQL] 2.7.x
+* https://h2database.com[H2 Database] 2.4.x
+* https://github.com/clojure/java.jdbc[clojure.java.jdbc] 0.7.x
+
+== API Reference
+
+=== Functions
+
+[cols="1,3"]
+|===
+| Function | Description
+
+| `(upsert data table)` +
+  `(upsert data table pk)`
+| Generate MERGE INTO SQL for upserting records. `pk` can be a keyword (single key) or vector (composite key).
+
+| `(listagg expr & opts)`
+| Build a LISTAGG expression. Options: `:separator`, `:distinct`, `:on-overflow`, `:within-group`, `:filter`, `:over`
+
+| `(boolean! v)`
+| Coerce any value to boolean with type-aware handling.
+
+| `(fbool coll)`
+| Extract first element from collection and coerce to boolean.
+
+| `(timestamp)` +
+  `(timestamp millis)`
+| Create a `java.sql.Timestamp` from current time or milliseconds.
+|===
+
+=== HoneySQL Extensions
+
+[cols="1,3"]
+|===
+| Keyword | Description
+
+| `:listagg`
+| LISTAGG function: `[:listagg expr separator? overflow?]`
+
+| `:listagg-distinct`
+| LISTAGG with DISTINCT: `[:listagg-distinct expr separator? overflow?]`
+
+| `:merge-into`
+| H2 MERGE INTO clause
+
+| `:records`
+| Records clause for MERGE INTO (internal)
+|===
 
 == License
 
-© 2022 UPD Consulting Ltd
+Copyright (c) 2022-2024 UPD Consulting Ltd
+          (c) 2024-2026 Fern Flower Lab
 
-Distributed under the MIT license.
+Distributed under the MIT License.

@@ -65,15 +65,55 @@
 
 ;; helpers
 
-(defn boolean! [v]
-  (if (not (boolean? v))
-    (boolean
-      (if (java.lang.Boolean/parseBoolean (str (or v "")))
-        true
-        (if (= v (.compareToIgnoreCase (str (or v "")) "false"))
-          false
-          (if (number? v) (pos? v) false))))
-    v))
+(def ^:private truthy-strings
+  "Set of string values that should coerce to true (case-insensitive)"
+  #{"true" "yes" "on" "1" "t" "y"})
+
+(def ^:private falsy-strings
+  "Set of string values that should coerce to false (case-insensitive)"
+  #{"false" "no" "off" "0" "f" "n" ""})
+
+(defn boolean!
+  "Coerces a value to boolean with sophisticated type handling.
+
+   Conversion rules:
+   - Boolean: returned as-is
+   - nil: returns false
+   - String: case-insensitive matching
+     - Truthy: \"true\", \"yes\", \"on\", \"1\", \"t\", \"y\"
+     - Falsy: \"false\", \"no\", \"off\", \"0\", \"f\", \"n\", \"\" (empty)
+     - Whitespace-only strings: false
+     - Other strings: false (strict mode - unknown strings are falsy)
+   - Number: positive numbers are true, zero and negative are false
+   - Collection: non-empty is true, empty is false
+   - Other: truthy if non-nil (standard Clojure truthiness)"
+  [v]
+  (cond
+    ;; nil is always false
+    (nil? v) false
+
+    ;; booleans pass through unchanged
+    (boolean? v) v
+
+    ;; strings: normalize and check against known truthy/falsy values
+    (string? v)
+    (let [normalized (-> v s/trim s/lower-case)]
+      (cond
+        (truthy-strings normalized) true
+        (falsy-strings normalized) false
+        ;; unknown strings default to false (strict interpretation)
+        :else false))
+
+    ;; numbers: positive is true, zero/negative is false
+    (number? v)
+    (pos? v)
+
+    ;; collections: non-empty is true
+    (coll? v)
+    (boolean (seq v))
+
+    ;; fallback: standard Clojure truthiness (non-nil is true)
+    :else true))
 
 (def fbool (comp boolean! first))
 
